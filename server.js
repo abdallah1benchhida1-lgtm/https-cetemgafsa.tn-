@@ -46,15 +46,23 @@ io.on('connection', (socket) => {
             participantsList: Array.from(users.values())
         });
 
+        // Si formateur déjà en ligne → notifier ce participant
+        // Petit délai pour que le client soit prêt à recevoir
         if (broadcasterId && user.role === 'participant') {
-            socket.emit('broadcaster-ready', broadcasterId);
+            setTimeout(() => {
+                socket.emit('broadcaster-ready', broadcasterId);
+            }, 500);
         }
     });
 
     // ─── Formateur broadcaster ────────────────────────────────
     socket.on('broadcaster', () => {
         broadcasterId = socket.id;
-        socket.broadcast.emit('broadcaster-ready', socket.id);
+        console.log(`🎥 Formateur broadcaster : ${socket.id}`);
+        // Notifier tous les participants avec délai
+        setTimeout(() => {
+            socket.broadcast.emit('broadcaster-ready', socket.id);
+        }, 300);
     });
 
     // ─── Participant veut regarder ────────────────────────────
@@ -75,7 +83,6 @@ io.on('connection', (socket) => {
     // 📷 PARTAGE CAM PARTICIPANT → FORMATEUR
     // ═══════════════════════════════════════════════════════════
 
-    // Participant demande à partager sa cam
     socket.on('cam-request', () => {
         const user = users.get(socket.id);
         if (!user || !broadcasterId) return;
@@ -85,35 +92,23 @@ io.on('connection', (socket) => {
         });
     });
 
-    // Formateur accepte → notifie le participant
     socket.on('cam-approved', (participantSocketId) => {
         io.to(participantSocketId).emit('cam-approved');
     });
 
-    // Formateur refuse → notifie le participant
     socket.on('cam-rejected', (participantSocketId) => {
         io.to(participantSocketId).emit('cam-rejected');
     });
 
-    // Formateur arrête la cam du participant
     socket.on('cam-stop', (participantSocketId) => {
         io.to(participantSocketId).emit('cam-stopped-by-formateur');
     });
 
-    // Signaling WebRTC participant → formateur
-    // Le participant envoie 'formateur' comme target, on redirige vers broadcasterId
     socket.on('p-offer', (target, desc) => {
         const dest = target === 'formateur' ? broadcasterId : target;
         if (dest) io.to(dest).emit('p-offer', socket.id, desc);
     });
 
-    socket.on('p-answer', (target, desc) => {
-        const dest = target === 'formateur' ? broadcasterId : target;
-        if (dest) io.to(dest).emit('p-answer', socket.id, desc);
-        else io.to(target).emit('p-answer', socket.id, desc);
-    });
-
-    // Pour p-answer depuis formateur vers participant : target = participantSocketId
     socket.on('p-answer-to', (participantSocketId, desc) => {
         io.to(participantSocketId).emit('p-answer', socket.id, desc);
     });
