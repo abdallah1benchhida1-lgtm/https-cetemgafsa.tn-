@@ -15,6 +15,10 @@ const emailToSocket = new Map();  // email (lowercase) → socketId
 // 🔑 Secret partagé entre PHP et Node pour sécuriser /force-kick
 const KICK_SECRET = process.env.KICK_SECRET || 'cetem_kick_2026';
 
+// ⏱️ RATE LIMITING
+const messageRateLimiter = new Map(); // socketId → lastTimestamp
+const RATE_LIMIT_MS = 500; // Max 1 message par 500ms
+
 app.use(express.json());
 
 function heureNow() {
@@ -22,6 +26,11 @@ function heureNow() {
         hour: '2-digit', minute: '2-digit', second: '2-digit',
         timeZone: 'Africa/Tunis'
     });
+}
+
+function logEvent(level, message) {
+    const timestamp = new Date().toISOString();
+    console.log(`[${timestamp}] ${level} ${message}`);
 }
 
 app.get('/', (req, res) => res.send('✅ Serveur WebRTC opérationnel'));
@@ -34,6 +43,7 @@ app.post('/force-kick', (req, res) => {
     const { secret, email } = req.body || {};
 
     if (secret !== KICK_SECRET) {
+        logEvent('⚠️', `Force-kick tentée avec secret invalide`);
         return res.status(403).json({ ok: false, message: 'Secret invalide' });
     }
     if (!email) {
@@ -44,7 +54,7 @@ app.post('/force-kick', (req, res) => {
     const socketId = emailToSocket.get(key);
 
     if (!socketId) {
-        // L'utilisateur n'est pas connecté — rien à faire
+        logEvent('ℹ️', `Force-kick pour ${email} — utilisateur non connecté`);
         return res.json({ ok: true, message: 'Utilisateur non connecté (rien à faire)' });
     }
 
@@ -53,158 +63,317 @@ app.post('/force-kick', (req, res) => {
         message: '🚫 Votre accès a été révoqué par l\'administrateur. La session va se fermer.'
     });
 
-    // Optionnel : déconnecter le socket côté serveur après un court délai
+    // Déconnecter le socket après un court délai
     setTimeout(() => {
         const sock = io.sockets.sockets.get(socketId);
-        if (sock) sock.disconnect(true);
+        if (sock) {
+            logEvent('🚫', `Socket ${socketId} disconnecté forcément`);
+            sock.disconnect(true);
+        }
     }, 2000);
 
-    console.log(`🚫 Kick forcé : ${email} (socket ${socketId})`);
+    logEvent('🚫', `Force-kick appliqué: ${email} (socket ${socketId})`);
     return res.json({ ok: true, message: `Utilisateur ${email} kické avec succès` });
 });
 
+// ═══════════════════════════════════════════════════════════
+// SOCKET.IO EVENTS
+// ═══════════════════════════════════════════════════════════
+
 io.on('connection', (socket) => {
-    console.log(`🔌 Connexion : ${socket.id}`);
+    logEvent('🔌', `Nouvelle connexion: ${socket.id}`);
 
     socket.on('join-chat', (data) => {
-        const user = {
-            socketId: socket.id,
-            nom: data.nom || 'Anonyme',
-            email: data.email || '',
-            etablissement: data.etablissement || '',
-            fonction: data.fonction || '',
-            role: data.role || 'participant',
-            heureConnexion: heureNow(),
-            heureDeconnexion: null
-        };
-        users.set(socket.id, user);
-        if (user.email) emailToSocket.set(user.email.toLowerCase(), socket.id);
+        try {
+            // Validation des données
+            if (!data || typeof data !== 'object') {
+                logEvent('⚠️', `join-chat invalide de ${socket.id}`);
+                return;
+            }
 
-        socket.emit('existing-users', {
-            users: Array.from(users.values()),
-            total: users.size
-        });
+            const nom           = String(data.nom || 'Anonyme').substring(0, 100);
+            const email         = String(data.email || '').substring(0, 255).toLowerCase();
+            const etablissement = String(data.etablissement || '').substring(0, 255);
+            const fonction      = String(data.fonction || '').substring(0, 255);
+            const role          = String(data.role || 'participant').substring(0, 50);
 
-        io.emit('user-joined', {
-            ...user,
-            participantsList: Array.from(users.values())
-        });
+            // ✅ FIXE #1: Gestion des doublons d'email
+            if (email) {
+                const oldSocketId = emailToSocket.get(email);
+                if (oldSocketId && oldSocketId !== socket.id) {
+                    logEvent('⚠️', `Doublon d'email ${email} — kick ancien socket ${oldSocketId}`);
+                    const oldSocket = io.sockets.sockets.get(oldSocketId);
+                    if (oldSocket) {
+                        oldSocket.emit('force-kicked', {
+                            message: '🔄 Vous êtes connecté ailleurs. La session actuelle va se fermer.'
+                        });
+                        setTimeout(() => oldSocket.disconnect(true), 1000);
+                    }
+                }
+            }
 
-        if (broadcasterId && user.role === 'participant') {
-            socket.emit('broadcaster-ready', broadcasterId);
+            const user = {
+                socketId: socket.id,
+                nom: nom,
+                email: email,
+                etablissement: etablissement,
+                fonction: fonction,
+                role: role,
+                heureConnexion: heureNow(),
+                heureDeconnexion: null
+            };
+
+            users.set(socket.id, user);
+            if (email) emailToSocket.set(email, socket.id);
+
+            logEvent('✅', `${nom} rejoint (${role}) - ${email}`);
+
+            socket.emit('existing-users', {
+                users: Array.from(users.values()),
+                total: users.size
+            });
+
+            io.emit('user-joined', {
+                ...user,
+                participantsList: Array.from(users.values())
+            });
+
+            if (broadcasterId && user.role === 'participant') {
+                socket.emit('broadcaster-ready', broadcasterId);
+            }
+
+        } catch (error) {
+            logEvent('❌', `Erreur join-chat: ${error.message}`);
         }
     });
 
     // ─── Formateur broadcaster ────────────────────────────────
     socket.on('broadcaster', () => {
-        broadcasterId = socket.id;
-        socket.broadcast.emit('broadcaster-ready', socket.id);
+        try {
+            broadcasterId = socket.id;
+            const user = users.get(socket.id);
+            logEvent('🎥', `Broadcaster actif: ${user?.nom || 'Unknown'}`);
+            socket.broadcast.emit('broadcaster-ready', socket.id);
+        } catch (error) {
+            logEvent('❌', `Erreur broadcaster: ${error.message}`);
+        }
     });
 
     // ─── Participant veut regarder ────────────────────────────
     socket.on('watcher', () => {
-        if (broadcasterId && broadcasterId !== socket.id) {
-            io.to(broadcasterId).emit('watcher', socket.id);
-        } else {
-            socket.emit('no-broadcaster');
+        try {
+            if (broadcasterId && broadcasterId !== socket.id) {
+                io.to(broadcasterId).emit('watcher', socket.id);
+            } else {
+                socket.emit('no-broadcaster');
+            }
+        } catch (error) {
+            logEvent('❌', `Erreur watcher: ${error.message}`);
         }
     });
 
     // ─── Signaling formateur → participants ───────────────────
-    socket.on('offer',     (id, desc)  => io.to(id).emit('offer',     socket.id, desc));
-    socket.on('answer',    (id, desc)  => io.to(id).emit('answer',    socket.id, desc));
-    socket.on('candidate', (id, cand)  => io.to(id).emit('candidate', socket.id, cand));
+    socket.on('offer', (id, desc) => {
+        try {
+            io.to(id).emit('offer', socket.id, desc);
+        } catch (error) {
+            logEvent('❌', `Erreur offer: ${error.message}`);
+        }
+    });
+
+    socket.on('answer', (id, desc) => {
+        try {
+            io.to(id).emit('answer', socket.id, desc);
+        } catch (error) {
+            logEvent('❌', `Erreur answer: ${error.message}`);
+        }
+    });
+
+    socket.on('candidate', (id, cand) => {
+        try {
+            io.to(id).emit('candidate', socket.id, cand);
+        } catch (error) {
+            logEvent('❌', `Erreur candidate: ${error.message}`);
+        }
+    });
 
     // ═══════════════════════════════════════════════════════════
     // 📷 PARTAGE CAM PARTICIPANT → FORMATEUR
     // ═══════════════════════════════════════════════════════════
 
-    // Participant demande à partager sa cam
     socket.on('cam-request', () => {
-        const user = users.get(socket.id);
-        if (!user || !broadcasterId) return;
-        io.to(broadcasterId).emit('cam-request', {
-            socketId: socket.id,
-            nom: user.nom
-        });
+        try {
+            const user = users.get(socket.id);
+            if (!user || !broadcasterId) return;
+            io.to(broadcasterId).emit('cam-request', {
+                socketId: socket.id,
+                nom: user.nom
+            });
+        } catch (error) {
+            logEvent('❌', `Erreur cam-request: ${error.message}`);
+        }
     });
 
-    // Formateur accepte → notifie le participant
     socket.on('cam-approved', (participantSocketId) => {
-        io.to(participantSocketId).emit('cam-approved');
+        try {
+            io.to(participantSocketId).emit('cam-approved');
+        } catch (error) {
+            logEvent('❌', `Erreur cam-approved: ${error.message}`);
+        }
     });
 
-    // Formateur refuse → notifie le participant
     socket.on('cam-rejected', (participantSocketId) => {
-        io.to(participantSocketId).emit('cam-rejected');
+        try {
+            io.to(participantSocketId).emit('cam-rejected');
+        } catch (error) {
+            logEvent('❌', `Erreur cam-rejected: ${error.message}`);
+        }
     });
 
-    // Formateur arrête la cam du participant
     socket.on('cam-stop', (participantSocketId) => {
-        io.to(participantSocketId).emit('cam-stopped-by-formateur');
+        try {
+            io.to(participantSocketId).emit('cam-stopped-by-formateur');
+        } catch (error) {
+            logEvent('❌', `Erreur cam-stop: ${error.message}`);
+        }
     });
 
-    // Signaling WebRTC participant → formateur
-    // Le participant envoie 'formateur' comme target, on redirige vers broadcasterId
+    // ─── Signaling WebRTC participant → formateur ──────────────
     socket.on('p-offer', (target, desc) => {
-        const dest = target === 'formateur' ? broadcasterId : target;
-        if (dest) io.to(dest).emit('p-offer', socket.id, desc);
+        try {
+            const dest = target === 'formateur' ? broadcasterId : target;
+            if (dest) io.to(dest).emit('p-offer', socket.id, desc);
+        } catch (error) {
+            logEvent('❌', `Erreur p-offer: ${error.message}`);
+        }
     });
 
     socket.on('p-answer', (target, desc) => {
-        const dest = target === 'formateur' ? broadcasterId : target;
-        if (dest) io.to(dest).emit('p-answer', socket.id, desc);
-        else io.to(target).emit('p-answer', socket.id, desc);
+        try {
+            const dest = target === 'formateur' ? broadcasterId : target;
+            if (dest) io.to(dest).emit('p-answer', socket.id, desc);
+            else io.to(target).emit('p-answer', socket.id, desc);
+        } catch (error) {
+            logEvent('❌', `Erreur p-answer: ${error.message}`);
+        }
     });
 
-    // Pour p-answer depuis formateur vers participant : target = participantSocketId
     socket.on('p-answer-to', (participantSocketId, desc) => {
-        io.to(participantSocketId).emit('p-answer', socket.id, desc);
+        try {
+            io.to(participantSocketId).emit('p-answer', socket.id, desc);
+        } catch (error) {
+            logEvent('❌', `Erreur p-answer-to: ${error.message}`);
+        }
     });
 
     socket.on('p-candidate', (target, cand) => {
-        const dest = target === 'formateur' ? broadcasterId : target;
-        if (dest) io.to(dest).emit('p-candidate', socket.id, cand);
+        try {
+            const dest = target === 'formateur' ? broadcasterId : target;
+            if (dest) io.to(dest).emit('p-candidate', socket.id, cand);
+        } catch (error) {
+            logEvent('❌', `Erreur p-candidate: ${error.message}`);
+        }
     });
 
     // ─── Chat ─────────────────────────────────────────────────
     socket.on('chat-message', (data) => {
-        const user = users.get(socket.id);
-        if (!user) return;
-        io.emit('new-message', {
-            nom: user.nom,
-            role: user.role,
-            message: data.message,
-            timestamp: heureNow()
-        });
+        try {
+            // ✅ FIXE #2: Validation stricte
+            if (!data || typeof data !== 'object') return;
+
+            const message = String(data.message || '').trim().substring(0, 500);
+            if (!message || message.length < 1) return;
+
+            const user = users.get(socket.id);
+            if (!user) return;
+
+            // ✅ FIXE #4: Rate limiting
+            const now = Date.now();
+            const lastMsg = messageRateLimiter.get(socket.id) || 0;
+
+            if (now - lastMsg < RATE_LIMIT_MS) {
+                socket.emit('rate-limited', '⏱️ Trop rapide, attendez...');
+                return;
+            }
+
+            messageRateLimiter.set(socket.id, now);
+
+            io.emit('new-message', {
+                nom: user.nom,
+                role: user.role,
+                message: message,
+                timestamp: heureNow()
+            });
+
+        } catch (error) {
+            logEvent('❌', `Erreur chat-message: ${error.message}`);
+        }
     });
 
     socket.on('raise-hand', () => {
-        const user = users.get(socket.id);
-        if (!user) return;
-        io.emit('hand-raised', { nom: user.nom, timestamp: heureNow() });
+        try {
+            const user = users.get(socket.id);
+            if (!user) return;
+            io.emit('hand-raised', {
+                nom: user.nom,
+                timestamp: heureNow()
+            });
+        } catch (error) {
+            logEvent('❌', `Erreur raise-hand: ${error.message}`);
+        }
     });
 
     // ─── Déconnexion ─────────────────────────────────────────
     socket.on('disconnect', () => {
-        const user = users.get(socket.id);
-        if (user) {
-            user.heureDeconnexion = heureNow();
-            users.delete(socket.id);
-            if (user.email) emailToSocket.delete(user.email.toLowerCase());
-            io.emit('user-left', {
-                ...user,
-                participantsList: Array.from(users.values())
-            });
+        try {
+            const user = users.get(socket.id);
+            if (user) {
+                user.heureDeconnexion = heureNow();
+                logEvent('🔌', `${user.nom} déconnecté (${socket.id})`);
+                users.delete(socket.id);
+                if (user.email) emailToSocket.delete(user.email);
+                
+                io.emit('user-left', {
+                    ...user,
+                    participantsList: Array.from(users.values())
+                });
+            }
+
+            // ✅ FIXE #3: Gestion correcte du broadcaster orphelin
+            if (socket.id === broadcasterId) {
+                logEvent('🎥', `Broadcaster déconnecté (${socket.id})`);
+                broadcasterId = null;
+                io.emit('broadcaster-disconnected');
+            } else if (broadcasterId) {
+                io.to(broadcasterId).emit('disconnectPeer', socket.id);
+            }
+
+            // Nettoyer le rate limiter
+            messageRateLimiter.delete(socket.id);
+
+        } catch (error) {
+            logEvent('❌', `Erreur disconnect: ${error.message}`);
         }
-        if (socket.id === broadcasterId) {
-            broadcasterId = null;
-            io.emit('broadcaster-disconnected');
-        } else if (broadcasterId) {
-            io.to(broadcasterId).emit('disconnectPeer', socket.id);
-        }
+    });
+
+    // ─── Gestion des erreurs de connexion ─────────────────────
+    socket.on('error', (error) => {
+        logEvent('❌', `Socket error (${socket.id}): ${error}`);
     });
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`🚀 Serveur démarré sur le port ${PORT}`));
+server.listen(PORT, () => {
+    logEvent('🚀', `Serveur démarré sur le port ${PORT}`);
+    logEvent('ℹ️', `Environment: ${process.env.NODE_ENV || 'development'}`);
+});
+
+// Gestion des erreurs non capturées
+process.on('uncaughtException', (error) => {
+    logEvent('💥', `Uncaught exception: ${error.message}`);
+    logEvent('💥', error.stack);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+    logEvent('💥', `Unhandled rejection: ${reason}`);
+});
