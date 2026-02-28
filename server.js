@@ -238,6 +238,17 @@ io.on('connection', (socket) => {
         }
     });
 
+    socket.on('block-participant-cam', (participantSocketId) => {
+        try {
+            // Envoyer uniquement au participant ciblé — bloque définitivement pour la session
+            io.to(participantSocketId).emit('cam-blocked-by-formateur');
+            const user = users.get(participantSocketId);
+            logEvent('🚫', `Webcam bloquée pour: ${user?.nom || participantSocketId}`);
+        } catch (error) {
+            logEvent('❌', `Erreur block-participant-cam: ${error.message}`);
+        }
+    });
+
     // ─── Signaling WebRTC participant → formateur ──────────────
     socket.on('p-offer', (target, desc) => {
         try {
