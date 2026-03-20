@@ -34,6 +34,56 @@ const emailToSocket = new Map();
 const socketToRoom  = new Map();
 
 app.use(express.json());
+app.use('/stream-ingest', express.raw({ type: 'image/jpeg', limit: '600kb' }));
+
+// ── SSE : distribution vidéo 1→N (supporte 100+ participants) ─
+let latestFrame  = null;          // dernier JPEG reçu du proxy
+const sseClients = new Map();     // id → res
+let   sseIdSeq   = 0;
+
+// POST /stream-ingest — appelé par local-proxy.js (~5fps)
+app.post('/stream-ingest', (req, res) => {
+    const key = req.query.key || '';
+    if (key !== (process.env.STREAM_KEY || 'cetem_stream_2026')) {
+        return res.status(403).json({ ok: false, error: 'cle invalide' });
+    }
+    if (!Buffer.isBuffer(req.body) || req.body.length < 100) {
+        return res.status(400).json({ ok: false, error: 'frame vide' });
+    }
+    latestFrame = req.body;
+    const b64   = latestFrame.toString('base64');
+    const msg   = 'data: ' + b64 + '\n\n';
+    sseClients.forEach((clientRes, id) => {
+        try { clientRes.write(msg); }
+        catch(e) { sseClients.delete(id); }
+    });
+    res.json({ ok: true, clients: sseClients.size, bytes: req.body.length });
+});
+
+// GET /stream — SSE pour les participants
+app.get('/stream', (req, res) => {
+    const id = ++sseIdSeq;
+    res.setHeader('Content-Type',                'text/event-stream');
+    res.setHeader('Cache-Control',               'no-cache');
+    res.setHeader('Connection',                  'keep-alive');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('X-Accel-Buffering',           'no');
+    res.flushHeaders();
+    if (latestFrame) {
+        try { res.write('data: ' + latestFrame.toString('base64') + '\n\n'); } catch(e) {}
+    }
+    sseClients.set(id, res);
+    logEvent('📡', 'SSE +1 (total ' + sseClients.size + ')');
+    const hb = setInterval(() => {
+        try { res.write(': ping\n\n'); }
+        catch(e) { clearInterval(hb); sseClients.delete(id); }
+    }, 20000);
+    req.on('close', () => {
+        clearInterval(hb);
+        sseClients.delete(id);
+        logEvent('📡', 'SSE -1 (restants ' + sseClients.size + ')');
+    });
+});
 
 // ── Helpers ────────────────────────────────────────────────────
 function heureNow() {
@@ -435,6 +485,49 @@ io.on('connection', (socket) => {
     });
 
     socket.on('error', (e) => logEvent('❌', `Socket error (${socket.id}): ${e}`));
+
+    // ── Relai audio formateur → participants ───────────────────
+    // Le formateur envoie des chunks opus via Socket.io,
+    // le serveur les redistribue à tous les participants de la salle
+    socket.on('audio-chunk', (data) => {
+        try {
+            const roomCode = socketToRoom.get(socket.id);
+            const room     = roomCode ? rooms.get(roomCode) : null;
+            if (!room) return;
+            const user = room.users.get(socket.id);
+            if (!user || user.role !== 'formateur') return;
+            room.users.forEach((u, sid) => {
+                if (sid !== socket.id && u.role === 'participant') {
+                    try { io.to(sid).emit('audio-chunk', data); } catch(e) {}
+                }
+            });
+        } catch(e) { logEvent('❌', `audio-chunk: ${e.message}`); }
+    });
+
+    // ── Notification stream SSE actif/arrêté ──────────────────
+    socket.on('stream-started', () => {
+        try {
+            const roomCode = socketToRoom.get(socket.id);
+            const room     = roomCode ? rooms.get(roomCode) : null;
+            if (!room) return;
+            room.broadcasterId = socket.id;
+            room.users.forEach((u, sid) => {
+                if (sid !== socket.id && u.role === 'participant') {
+                    io.to(sid).emit('stream-started');
+                }
+            });
+            logEvent('📡', `stream-started diffusé [${roomCode}]`);
+        } catch(e) {}
+    });
+
+    socket.on('stream-stopped', () => {
+        try {
+            const roomCode = socketToRoom.get(socket.id);
+            const room     = roomCode ? rooms.get(roomCode) : null;
+            if (!room) return;
+            io.in(roomCode).emit('stream-stopped');
+        } catch(e) {}
+    });
 });
 
 // ── Démarrage ──────────────────────────────────────────────────
