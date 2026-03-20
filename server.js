@@ -209,7 +209,10 @@ io.on('connection', (socket) => {
     socket.on('broadcaster', (opts) => {
         try {
             const roomCode = socketToRoom.get(socket.id);
-            if (!roomCode) return;
+            if (!roomCode) {
+                logEvent('⚠️', `broadcaster ignoré — socket ${socket.id} pas encore dans une salle`);
+                return;
+            }
             const room = rooms.get(roomCode);
             if (!room) return;
 
@@ -217,20 +220,14 @@ io.on('connection', (socket) => {
             room.broadcasterId = socket.id;
             const user = room.users.get(socket.id);
 
-            // heartbeat : le formateur ré-émet 'broadcaster' régulièrement
-            // → on met à jour broadcasterId mais on ne notifie PAS toute la salle
-            //   (ce qui déclencherait des re-négociations WebRTC et couperait la vidéo)
-            // → on notifie UNIQUEMENT les participants qui n'ont pas encore reçu l'offer
-            //   = ceux qui ont un état ICE 'new' ou qui n'ont pas de connexion
-            // Côté serveur on ne peut pas savoir ça, donc :
-            // - si déjà broadcaster : silent (les connexions actives continuent)
-            // - si nouveau broadcaster : notifier tout le monde
             if (!wasAlreadyBroadcaster) {
-                logEvent('🎥', `Broadcaster actif: ${user?.nom || socket.id} [${roomCode}]`);
+                logEvent('🎥', `Broadcaster actif: ${user?.nom || socket.id} [${roomCode}] (${room.users.size} users)`);
+                // Notifier tous les participants de la salle
                 socket.to(roomCode).emit('broadcaster-ready', socket.id);
+                logEvent('📢', `broadcaster-ready envoyé à ${room.users.size - 1} participants`);
             } else {
+                // Heartbeat silencieux — pas de re-négociation
                 logEvent('🔄', `Broadcaster heartbeat: ${user?.nom || socket.id} [${roomCode}]`);
-                // Ne rien émettre — les connexions WebRTC existantes continuent sans interruption
             }
         } catch (e) { logEvent('❌', `broadcaster: ${e.message}`); }
     });
@@ -239,13 +236,19 @@ io.on('connection', (socket) => {
     socket.on('watcher', () => {
         try {
             const roomCode = socketToRoom.get(socket.id);
-            if (!roomCode) return;
+            if (!roomCode) {
+                logEvent('⚠️', `watcher ignoré — socket ${socket.id} pas dans une salle`);
+                socket.emit('no-broadcaster');
+                return;
+            }
             const room = rooms.get(roomCode);
-            if (!room) return;
+            if (!room) { socket.emit('no-broadcaster'); return; }
 
             if (room.broadcasterId && room.broadcasterId !== socket.id) {
+                logEvent('👁️', `watcher ${socket.id} → broadcaster ${room.broadcasterId} [${roomCode}]`);
                 io.to(room.broadcasterId).emit('watcher', socket.id);
             } else {
+                logEvent('ℹ️', `watcher ${socket.id} — pas de broadcaster dans [${roomCode}]`);
                 socket.emit('no-broadcaster');
             }
         } catch (e) { logEvent('❌', `watcher: ${e.message}`); }
