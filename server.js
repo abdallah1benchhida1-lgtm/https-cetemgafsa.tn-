@@ -206,18 +206,32 @@ io.on('connection', (socket) => {
     socket.on('join-chat',  handleJoin);   // rétrocompatibilité
 
     // ── Broadcaster ────────────────────────────────────────────
-    socket.on('broadcaster', () => {
+    socket.on('broadcaster', (opts) => {
         try {
             const roomCode = socketToRoom.get(socket.id);
             if (!roomCode) return;
             const room = rooms.get(roomCode);
             if (!room) return;
 
+            const wasAlreadyBroadcaster = (room.broadcasterId === socket.id);
             room.broadcasterId = socket.id;
             const user = room.users.get(socket.id);
-            logEvent('🎥', `Broadcaster actif: ${user?.nom || socket.id} [${roomCode}]`);
 
-            socket.to(roomCode).emit('broadcaster-ready', socket.id);
+            // heartbeat : le formateur ré-émet 'broadcaster' régulièrement
+            // → on met à jour broadcasterId mais on ne notifie PAS toute la salle
+            //   (ce qui déclencherait des re-négociations WebRTC et couperait la vidéo)
+            // → on notifie UNIQUEMENT les participants qui n'ont pas encore reçu l'offer
+            //   = ceux qui ont un état ICE 'new' ou qui n'ont pas de connexion
+            // Côté serveur on ne peut pas savoir ça, donc :
+            // - si déjà broadcaster : silent (les connexions actives continuent)
+            // - si nouveau broadcaster : notifier tout le monde
+            if (!wasAlreadyBroadcaster) {
+                logEvent('🎥', `Broadcaster actif: ${user?.nom || socket.id} [${roomCode}]`);
+                socket.to(roomCode).emit('broadcaster-ready', socket.id);
+            } else {
+                logEvent('🔄', `Broadcaster heartbeat: ${user?.nom || socket.id} [${roomCode}]`);
+                // Ne rien émettre — les connexions WebRTC existantes continuent sans interruption
+            }
         } catch (e) { logEvent('❌', `broadcaster: ${e.message}`); }
     });
 
