@@ -130,8 +130,10 @@ io.on('connection', (socket) => {
             const etablissement = String(data.etablissement || '').substring(0, 255);
             const fonction      = String(data.fonction      || '').substring(0, 255);
             const role          = String(data.role          || 'participant').substring(0, 50);
-            // roomCode = code fourni, ou fallback sur 'default' pour rétrocompat
-            const roomCode      = String(data.roomCode || data.code || 'default').substring(0, 20);
+            // roomCode = salle de formation explicite uniquement
+            // IMPORTANT: data.code est le code d'accès PERSONNEL du participant
+            // → ne jamais l'utiliser comme roomCode (sinon chaque participant est dans sa propre salle)
+            const roomCode      = String(data.roomCode || 'default').substring(0, 20);
 
             // Gestion doublons email
             if (email) {
