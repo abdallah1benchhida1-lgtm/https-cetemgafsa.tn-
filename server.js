@@ -239,8 +239,19 @@ io.on('connection', (socket) => {
     });
 
     // ── Watcher (participant veut voir) ────────────────────────
+    const _watcherRateMap = new Map(); // socketId → timestamp du dernier watcher traité
     socket.on('watcher', () => {
         try {
+            // ── Rate-limit : ignorer si un watcher a déjà été traité dans les 800 ms ──
+            // Filet de sécurité contre le double-watcher (existing-users + broadcaster-ready)
+            const now = Date.now();
+            const lastWatcher = _watcherRateMap.get(socket.id) || 0;
+            if (now - lastWatcher < 800) {
+                logEvent('⏭️', `watcher dupliqué ignoré (${socket.id}) — ${now - lastWatcher}ms depuis le dernier`);
+                return;
+            }
+            _watcherRateMap.set(socket.id, now);
+
             const roomCode = socketToRoom.get(socket.id);
             if (!roomCode) {
                 logEvent('⚠️', `watcher ignoré — socket ${socket.id} pas dans une salle`);
@@ -390,6 +401,7 @@ io.on('connection', (socket) => {
             const roomCode = socketToRoom.get(socket.id);
             socketToRoom.delete(socket.id);
             messageRateLimiter.delete(socket.id);
+            _watcherRateMap.delete(socket.id);  // nettoyage rate-limit watcher
 
             if (!roomCode) return;
             const room = rooms.get(roomCode);
