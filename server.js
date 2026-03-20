@@ -221,13 +221,19 @@ io.on('connection', (socket) => {
             const user = room.users.get(socket.id);
 
             if (!wasAlreadyBroadcaster) {
-                logEvent('🎥', `Broadcaster actif: ${user?.nom || socket.id} [${roomCode}] (${room.users.size} users)`);
-                // Notifier tous les participants de la salle
-                socket.to(roomCode).emit('broadcaster-ready', socket.id);
-                logEvent('📢', `broadcaster-ready envoyé à ${room.users.size - 1} participants`);
+                logEvent('🎥', `Broadcaster actif: ${user?.nom || socket.id} [${roomCode}] (${room.users.size} users dans la salle)`);
+                // Notifier TOUS les participants déjà dans la salle
+                let notified = 0;
+                room.users.forEach((u, sid) => {
+                    if (sid !== socket.id && u.role === 'participant') {
+                        io.to(sid).emit('broadcaster-ready', socket.id);
+                        notified++;
+                    }
+                });
+                logEvent('📢', `broadcaster-ready envoyé à ${notified} participant(s)`);
             } else {
-                // Heartbeat silencieux — pas de re-négociation
-                logEvent('🔄', `Broadcaster heartbeat: ${user?.nom || socket.id} [${roomCode}]`);
+                // Heartbeat silencieux
+                logEvent('🔄', `Broadcaster heartbeat [${roomCode}]`);
             }
         } catch (e) { logEvent('❌', `broadcaster: ${e.message}`); }
     });
