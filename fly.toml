@@ -1,0 +1,22 @@
+app = "cetem-formation"
+primary_region = "cdg"
+
+[build]
+
+[env]
+  PORT = "3000"
+  STREAM_KEY = "cetem_stream_2026"
+  KICK_SECRET = "cetem_kick_2026"
+  NODE_ENV = "production"
+
+[http_service]
+  internal_port = 3000
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[vm]]
+  memory = "256mb"
+  cpu_kind = "shared"
+  cpus = 1
