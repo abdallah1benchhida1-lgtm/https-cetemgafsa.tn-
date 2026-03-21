@@ -1,24 +1,18 @@
+
+
 {
-  "name": "cetem-formation-webrtc",
-  "version": "2.1.0",
-  "description": "Serveur WebRTC — Formation en direct CETEM Gafsa",
+  "name": "cetem-formation",
+  "version": "1.0.0",
+  "description": "Serveur Socket.IO — Formation en ligne CETEM GAFSA",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js",
-    "dev": "nodemon server.js"
+    "start": "node server.js"
   },
-  "keywords": ["webrtc", "socket.io", "formation", "streaming", "cetem"],
-  "author": "CETEM Gafsa",
-  "license": "ISC",
   "dependencies": {
-    "express": "^4.18.2",
-    "socket.io": "^4.7.2"
-  },
-  "devDependencies": {
-    "nodemon": "^3.0.1"
+    "express": "^4.18.0",
+    "socket.io": "^4.7.0"
   },
   "engines": {
-    "node": ">=14.0.0"
+    "node": ">=18.0.0"
   }
 }
-
